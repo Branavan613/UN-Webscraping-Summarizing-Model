@@ -34,13 +34,12 @@ print(input_field)
 button = driver.find_element(By.ID, 'btnSearch') 
 
 input_field.clear() 
-input_field.send_keys('abortion')  
+input_field.send_keys('tamil')  
 
 # Scroll to the button
 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
 
-time.sleep(1) 
-
+time.sleep(1)
 
 # Click the button
 button.click()
@@ -52,14 +51,9 @@ first_span = driver.find_element(By.CSS_SELECTOR, '.search-criteria > span')
 pagenum = int(first_span.find_elements(By.TAG_NAME, "b")[-1].text)
 
 def read_pdf(pdf_file):
-    content = []
-    pagenum = 1
-    with fitz.open(stream = pdf_file, filetype = "pdf") as file:
-        for page in file: 
-            c = page.get_text()
-            content.append([pagenum, c.lower()])
-            pagenum += 1
-    return content
+    with fitz.open(stream=pdf_file, filetype="pdf") as file:
+        return [page.get_text().lower() for page in file]
+
 
 # Allow time for the page to update or navigate 
 def next():
@@ -80,26 +74,32 @@ def next():
     time.sleep(2)
 
 # Use BeautifulSoup to parse the updated page content
-soup = BeautifulSoup(driver.page_source, 'html.parser')
+
 
 links = []
-
+only_links = []
 def linkpull():
     """
     pulls all links from active page
     """
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
     search_items = soup.find_all('div', class_='search-results-item')
-
+    count = 0
     for search_item in search_items:
+        
         # Find all <a> elements with the class 'icofont-ui-file' within the container
         symbol = search_item.find("div", class_="symbol")
         container = symbol.find("div", class_="text-align-container")
         link = container.find('a', class_='icofont-ui-file')
         
         link_names = search_item.find_all('h2')
-
+        if not link in only_links:
         # Loop through each <a> element and get the href attribute
-        links.append([link_names[-1].text, link.get('href')])
+            links.append([link_names[-1].text, link.get('href')])
+            only_links.append(link)
+            count += 1
+    print(count)
+        
 
         
 
@@ -108,10 +108,13 @@ max = math.ceil(pagenum/20)-1
 if max > 25:
     max = math.ceil(max/2)
     
-for page in range(max):
+for page in range(2):
     next()
     linkpull()
-    
+
+print(links)
+print(len(links))
+
 import ollama
 import chromadb
 
@@ -119,10 +122,10 @@ from chromadb.config import Settings
 
 client = chromadb.PersistentClient(path=".", settings=Settings(allow_reset=True))
 collection = client.create_collection(name="un_docs")
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, separators=["\n\n", "\n", " ", ""])
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=50, separators=["\n\n", "\n", " ", ""])
  
 
-print(links)
+
 metadata = []
 doc_id = 0
 for link in links:
@@ -140,32 +143,64 @@ for link in links:
         doc_content = read_pdf(response.content)
         print("PDF downloaded successfully!")
 
-        for p in doc_content:
-            documents = text_splitter.split_text(p[1])
+        # Choose a batch size based on API capability and memory constraints
+        
+        batch_docs = []  # Stores text chunks for each batch
+        batch_metadata = []  # Stores metadata for each chunk
+        batch_ids = []  # Stores unique IDs for each chunk
+        batch_embedding = []
+
+        # Example loop through each document and its chunks
+        for p, page_content in enumerate(doc_content):
+            documents = text_splitter.split_text(page_content)
             
             for i, d in enumerate(documents):
                 response = ollama.embeddings(model="nomic-embed-text", prompt=d)
                 embedding = response["embedding"]
-                
-                # Create metadata dictionary
-                metadata = {
+                batch_embedding.append(embedding)
+                if not embedding:
+                    print(f"Embedding failed for chunk {i}; skipping.")
+                    continue
+                # Add text chunk and metadata to the batch
+                batch_docs.append(d)
+                batch_metadata.append({
                     "title": name,
                     "link": url,
                     "chunk_index": i,
-                    "page": p[0]
-                }
-                
-                # Add to collection with unique id for each chunk
-                collection.add(
-                    ids=[f"{doc_id}_{i}"],
-                    embeddings=[embedding],
-                    documents=[d],
-                    metadatas=[metadata]
-                )
+                    "page": p + 1
+                })
+                batch_ids.append(f"{doc_id}_{p+1}_{i}")
+
+                # When the batch is full, send it for embedding
         
-        doc_id += 1
+        try:
+            
+            # Add the entire batch to ChromaDB
+            collection.add(
+                ids=batch_ids,
+                embeddings=batch_embedding,
+                documents=batch_docs,
+                metadatas=batch_metadata
+            )
+
+            # Clear the batch lists for the next set
+            batch_docs.clear()
+            batch_metadata.clear()
+            batch_ids.clear()
+            batch_embedding.clear()
+
+        except Exception as e:
+            print(f"Batch embedding error: {e}")
+            continue
+        
+        # Ensure any remaining chunks are processed after loop completes
+        
+
     else:
         print(f"Failed to download PDF. Status code: {response.status_code}")
+    doc_id += 1
 # Close the WebDriver
-print
+print("hi")
+print(collection.count())
+
 driver.quit()
